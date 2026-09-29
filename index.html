@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>주조 생산실적 분석 — 1단계</title>
+  <meta name="description" content="주간 주조 생산실적 엑셀을 여러 주 쌓아 품목별 분석·주간 생산결산·이상 탐지(규칙 + AI 프롬프트)·주간 보고서 초안을 만드는 브라우저 도구(1단계)">
+  <meta name="robots" content="noindex">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <a class="skip" href="#main">본문으로 건너뛰기</a>
+  <div class="shell">
+    <aside class="side" aria-label="주 메뉴">
+      <a class="brand" href="#/import">
+        <span class="brand-mark" aria-hidden="true">주조</span>
+        <span class="brand-text">
+          <span class="brand-name">생산실적 분석</span>
+          <span class="brand-sub">data09-25 · 1단계</span>
+        </span>
+      </a>
+      <nav class="nav" id="nav"></nav>
+    </aside>
+
+    <div class="body">
+      <header class="topbar">
+        <a class="scope-chip" id="dataChip" href="#/import"></a>
+        <span class="topbar-note" id="storeNote"></span>
+      </header>
+      <div id="sampleBanner" class="sample-banner" hidden></div>
+      <main id="main" class="main" tabindex="-1"></main>
+      <footer class="site-footer">
+        1단계 · 파일과 데이터는 이 브라우저 안에서만 읽고 저장합니다(서버로 보내지 않음) · AI 자동 보내기는 설정한 경우에만
+      </footer>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <!-- 로컬 파일(file://)로 열어도 돌도록 module 이 아닌 일반 스크립트로 불러옵니다 -->
+  <script src="vendor/xlsx.full.min.js"></script>
+  <script src="js/logic.js"></script>
+  <script src="js/sample-data.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/charts.js"></script>
+  <script src="js/ai-endpoint.js"></script>
+  <script src="js/ai-panel.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
