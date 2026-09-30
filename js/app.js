@@ -4,7 +4,7 @@
   'use strict';
   var L = window.CastLogic, S = window.CastStore, C = window.CastCharts, AIP = window.AIPanel;
   var db = S.loadDb();
-  var ui = { week: '', span: 8, item: '', from: '', to: '', pending: [] };
+  var ui = { week: '', span: 8, item: '', from: '', to: '', pending: [], errors: [], progress: '', weeklyView: 'pivot' };
   var main = document.getElementById('main');
 
   /* ── 작은 도구 ───────────────────────────── */
@@ -116,17 +116,46 @@
     item.aoa = sh ? sh.aoa : [];
     item.result = L.parseSheet(item.aoa, { fileName: item.fileName, overrides: item.overrides });
   }
+  /* 3~4달 치(파일 십수 개)를 한 번에 넣어도 되도록: 하나씩 차례로 읽고(메모리·화면 멈춤 방지) 진행을 보여 주며,
+     엑셀 잠금 파일(~$…)·엑셀이 아닌 파일·이미 올려 둔 같은 파일은 건너뛰고, 못 읽은 파일은 목록으로 남깁니다. */
+  function fileId(f) { return f.name + '|' + f.size + '|' + (f.lastModified || 0); }
   function handleFiles(list) {
-    var files = Array.prototype.slice.call(list || []).filter(function (f) { return /\.(xlsx|xlsm|xls|csv)$/i.test(f.name); });
-    if (!files.length) { toast('엑셀 파일(.xlsx·.xls·.csv)을 골라 주세요.', true); return; }
-    Promise.all(files.map(function (f) { return readFile(f).catch(function (e) { return { error: e.message }; }); })).then(function (items) {
-      items.forEach(function (it) { if (it.error) toast(it.error, true); else ui.pending.push(it); });
-      render();
+    var all = Array.prototype.slice.call(list || []);
+    var skipped = [];
+    var files = all.filter(function (f) {
+      if (/^~\$/.test(f.name)) { skipped.push(f.name + ' (엑셀 잠금 파일)'); return false; }
+      if (!/\.(xlsx|xlsm|xls|csv)$/i.test(f.name)) { if (!/^\./.test(f.name)) skipped.push(f.name + ' (엑셀 아님)'); return false; }
+      if (ui.pending.some(function (p) { return p.fid === fileId(f); })) { skipped.push(f.name + ' (이미 올려 둠)'); return false; }
+      return true;
     });
+    if (!files.length) { toast(skipped.length ? '가져올 엑셀이 없습니다(' + skipped.length + '개 건너뜀).' : '엑셀 파일(.xlsx·.xls·.csv)을 골라 주세요.', true); return; }
+    files.sort(function (a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
+    ui.errors = skipped.map(function (x) { return '건너뜀: ' + x; });
+    var i = 0;
+    (function next() {
+      if (i >= files.length) { ui.progress = ''; render(); toast(files.length + '개 파일을 읽었습니다. 아래에서 확인한 뒤 반영해 주세요.'); return; }
+      var f = files[i++];
+      ui.progress = '읽는 중 ' + i + ' / ' + files.length + ' — ' + f.name;
+      var pr = document.getElementById('importProgress'); if (pr) pr.textContent = ui.progress;
+      readFile(f).then(function (it) {
+        it.fid = fileId(f);
+        it.already = db.files.some(function (x) { return x.name === f.name; });
+        ui.pending.push(it);
+        applySameHeader(it);
+      }, function (e) { ui.errors.push(e.message); }).then(function () { setTimeout(next, 0); });
+    })();
+  }
+  /* 머리행이 같은 파일에 이미 고친 열 연결이 있으면 그대로 씁니다(첫 파일만 고치면 나머지도 따라감) */
+  function applySameHeader(it) {
+    var sig = L.headerSignature(it.result.det);
+    var src = ui.pending.filter(function (p) { return p !== it && Object.keys(p.overrides).length && L.headerSignature(p.result.det) === sig; })[0];
+    if (src) { it.overrides = JSON.parse(JSON.stringify(src.overrides)); reparse(it); }
   }
   function commit(items) {
     var total = { added: 0, updated: 0, superseded: 0, planSkipped: 0 }, ok = 0;
-    items.forEach(function (it) {
+    // 고른 순서와 상관없이 실적이 이른 파일부터 — 늦은 주의 실적이 앞 주 파일의 「다음 주 계획」 행을 대신합니다
+    var ordered = L.importOrder(items.map(function (it) { return { fileName: it.fileName, records: it.result.records, it: it }; })).map(function (x) { return x.it; });
+    ordered.forEach(function (it) {
       var r = it.result;
       if (r.det.missing.length) return;
       var m = L.mergeRecords(db.records, r.records);
@@ -140,6 +169,7 @@
     ui.pending = ui.pending.filter(function (p) { return items.indexOf(p) < 0; });
     ui.week = '';
     save();
+    ui.errors = [];
     toast(ok + '개 파일 반영 — 새 행 ' + total.added + ' · 바뀐 행 ' + total.updated + ' · 계획 행 → 실적 행 ' + total.superseded + (total.planSkipped ? ' · 이미 실적이 있어 건너뛴 계획 행 ' + total.planSkipped : ''));
     render();
   }
@@ -161,9 +191,12 @@
   function pageImport() {
     var input = h('input', { type: 'file', multiple: true, accept: '.xlsx,.xlsm,.xls,.csv' });
     input.addEventListener('change', function () { handleFiles(input.files); input.value = ''; });
+    var folder = h('input', { type: 'file', multiple: true, webkitdirectory: true });
+    folder.addEventListener('change', function () { handleFiles(folder.files); folder.value = ''; });
     var drop = h('div', { class: 'drop' },
       h('label', { class: 'btn btn-primary' }, input, '주간 엑셀 고르기(여러 개 가능)'),
-      h('span', { class: 'note' }, '또는 파일을 여기로 끌어다 놓아 주세요. 여러 주를 한꺼번에 가져올 수 있습니다.'));
+      h('label', { class: 'btn' }, folder, '폴더째 고르기'),
+      h('span', { class: 'note' }, '또는 파일을 여기로 끌어다 놓아 주세요. 3~4달 치 주간 파일을 한꺼번에(Ctrl+A 로 모두 골라) 넣어도 됩니다.'));
     drop.addEventListener('dragover', function (e) { e.preventDefault(); drop.classList.add('over'); });
     drop.addEventListener('dragleave', function () { drop.classList.remove('over'); });
     drop.addEventListener('drop', function (e) { e.preventDefault(); drop.classList.remove('over'); handleFiles(e.dataTransfer.files); });
@@ -178,12 +211,30 @@
           h('li', null, '같은 행(일자 + 호기 + 품번 + 주조일자)을 다시 가져오면 새 값으로 바뀝니다. 같은 파일을 두 번 넣어도 두 번 세지 않습니다.'),
           h('li', null, '주간표 아래쪽의 「다음 주 계획」 행(주조일자·실적이 빈 행)은 계획으로만 보관하고, 다음 주 파일에서 실적 행이 오면 그 행으로 바꿉니다.'),
           h('li', null, '파일 아래의 비가동 코드 범례(Code · 항목 · 비가동의 정의)가 있으면 코드 이름을 자동으로 채웁니다.'),
-          h('li', null, '파일은 서버로 보내지 않고 이 브라우저 안에서만 읽습니다.')))];
+          h('li', null, '여러 파일은 고른 순서와 상관없이 실적 날짜가 이른 파일부터 반영합니다. 한 파일에서 열 연결을 고치면 머리행이 같은 나머지 파일에도 똑같이 적용됩니다.'),
+          h('li', null, '파일은 서버로 보내지 않고 이 브라우저 안에서만 읽습니다.')),
+        h('p', { class: 'note', id: 'importProgress', 'aria-live': 'polite' }, ui.progress || ''),
+        ui.errors.length ? h('details', { class: 'warn-list', open: true }, h('summary', null, '읽지 못했거나 건너뛴 파일 ' + ui.errors.length + '개'),
+          h('ul', null, ui.errors.map(function (e) { return h('li', null, e); }))) : null)];
 
     if (ui.pending.length) {
-      var box = h('section', { class: 'card' }, h('h2', null, '2. 열 연결 확인 후 반영'));
-      ui.pending.forEach(function (it) { box.appendChild(pendingCard(it)); });
+      var box = h('section', { class: 'card' }, h('h2', null, '2. 열 연결 확인 후 반영 (' + ui.pending.length + '개 파일)'));
       var ready = ui.pending.filter(function (it) { return !it.result.det.missing.length; });
+      var sorted = L.importOrder(ui.pending.map(function (it) { return { fileName: it.fileName, records: it.result.records, it: it }; })).map(function (x) { return x.it; });
+      box.appendChild(table(['파일', '실적 주', '실적 행', '계획 행', '알림', '상태'], sorted.map(function (it) {
+        var r = it.result, wk = L.weeksOf(r.records.filter(function (x) { return x.produced; }));
+        return { cls: r.det.missing.length ? 'excluded' : null, cells: [it.fileName,
+          wk.length ? L.weekLabel(wk[0]).split(' (')[0] + (wk.length > 1 ? ' ~ ' + L.weekLabel(wk[wk.length - 1]).split(' (')[0] : '') : '없음',
+          r.records.length - r.planOnly, r.planOnly, r.warnings.length + r.det.warnings.length,
+          r.det.missing.length ? '열 연결 필요' : it.already ? '이전에 가져온 파일(새 값으로 바뀜)' : '반영 준비됨'] };
+      }), { num: [0, 0, 1, 1, 1, 0] }));
+      var dupWeeks = {};
+      ui.pending.forEach(function (it) { L.weeksOf(it.result.records.filter(function (x) { return x.produced; })).forEach(function (w) { (dupWeeks[w] = dupWeeks[w] || []).push(it.fileName); }); });
+      var dups = Object.keys(dupWeeks).filter(function (w) { return dupWeeks[w].length > 1; }).sort();
+      if (dups.length) box.appendChild(h('p', { class: 'alert info' }, '같은 주 실적이 여러 파일에 있습니다: ' + dups.map(function (w) { return L.weekLabel(w).split(' (')[0] + '(' + dupWeeks[w].length + '개 파일)'; }).join(', ') +
+        '. 같은 행은 한 번만 세고, 늦은 파일의 값이 남습니다.'));
+      box.appendChild(h('h3', null, '파일별 자세히'));
+      sorted.forEach(function (it) { box.appendChild(pendingCard(it)); });
       box.appendChild(h('div', { class: 'btn-row' },
         h('button', { type: 'button', class: 'btn btn-primary', disabled: !ready.length, onclick: function () { commit(ready); } }, '확인한 ' + ready.length + '개 파일 반영'),
         h('button', { type: 'button', class: 'btn', onclick: function () { ui.pending = []; render(); } }, '취소')));
@@ -197,7 +248,9 @@
           tile('품번', items.length + '개'),
           tile('실적 행', L.fmtN(db.records.filter(function (r) { return r.produced; }).length)),
           tile('계획만 있는 행', L.fmtN(db.records.filter(function (r) { return !r.produced; }).length), '아직 실적이 없는 계획')),
-        table(['가져온 파일', '시트', '행', '가져온 때'], db.files.slice(-12).reverse().map(function (f) { return [f.name, f.sheet, f.rows, f.at]; }), { num: [0, 0, 1, 0] }),
+        coverageNote(),
+        h('details', null, h('summary', null, '가져온 파일 ' + db.files.length + '개 보기'),
+          table(['가져온 파일', '시트', '행', '가져온 때'], db.files.slice().reverse().map(function (f) { return [f.name, f.sheet, f.rows, f.at]; }), { num: [0, 0, 1, 0] })),
         h('div', { class: 'btn-row', style: 'margin-top:12px' },
           h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
             if (!confirm('이 브라우저에 쌓인 생산실적·설정을 모두 지울까요? (되돌릴 수 없습니다. 먼저 설정 화면에서 JSON 백업을 받아 두면 안전합니다)')) return;
@@ -205,6 +258,13 @@
           } }, '모든 데이터 지우기')))
         : h('p', { class: 'note' }, '아직 없습니다.')));
     return out;
+  }
+  function coverageNote() {
+    var cov = L.weekCoverage(db.records);
+    if (!cov.weeks.length) return null;
+    return cov.missing.length
+      ? h('p', { class: 'alert warn' }, '실적이 빠진 주가 있습니다: ' + cov.missing.map(function (w) { return L.weekLabel(w).split(' (')[0]; }).join(', ') + '. 휴무 주가 아니라면 그 주 파일을 더 넣어 주세요(이상 탐지 기준선이 짧아집니다).')
+      : h('p', { class: 'note' }, L.weekLabel(cov.first).split(' (')[0] + ' ~ ' + L.weekLabel(cov.last).split(' (')[0] + ' — ' + cov.weeks.length + '주가 빠짐없이 이어져 있습니다.');
   }
   function pendingCard(it) {
     var r = it.result, det = r.det;
@@ -222,7 +282,15 @@
         if (det.map[f.id] === i) o.selected = true;
         sel.appendChild(o);
       });
-      sel.addEventListener('change', function () { it.overrides[f.id] = Number(sel.value); reparse(it); render(); });
+      sel.addEventListener('change', function () {
+        var sig = L.headerSignature(it.result.det), n = 0;
+        ui.pending.forEach(function (p) {
+          if (p !== it && L.headerSignature(p.result.det) !== sig) return;
+          p.overrides[f.id] = Number(sel.value); reparse(p); if (p !== it) n++;
+        });
+        if (n) toast('머리행이 같은 파일 ' + n + '개에도 같은 연결을 적용했습니다.');
+        render();
+      });
       var col = det.map[f.id];
       var exv = col == null ? '' : ex[col];
       if (exv instanceof Date) exv = L.toISO(exv);
@@ -231,7 +299,8 @@
         h('span', { class: 'ex' }, col == null ? '연결 안 됨' : '예: ' + (exv == null || exv === '' ? '(빈칸)' : String(exv)))));
     });
     var weeksIn = L.weeksOf(r.records.filter(function (x) { return x.produced; }));
-    return h('fieldset', { class: 'block' }, h('legend', null, it.fileName),
+    var needs = det.missing.length > 0 || det.warnings.length > 0;
+    return h('details', { class: 'block', open: needs || ui.pending.length === 1 ? true : null }, h('summary', null, it.fileName + (det.missing.length ? ' — 열 연결 필요' : '')),
       h('div', { class: 'form-grid' },
         fld('시트', sheetSel, it.sheets.length > 1 ? '실적 시트를 자동으로 골랐습니다(요약·피벗 시트는 품번 열이 없어 빠짐).' : null),
         h('div', { class: 'field' }, h('span', null, '읽은 결과'),
@@ -254,7 +323,7 @@
     var itemSel = h('select', { 'aria-label': '품목' });
     items.forEach(function (it) { var o = h('option', { value: it.partNo }, it.partNo + ' · ' + it.partName); if (it.partNo === ui.item) o.selected = true; itemSel.appendChild(o); });
     itemSel.addEventListener('change', function () { ui.item = itemSel.value; render(); });
-    var spanSel = h('select', { 'aria-label': '추이 기간' }, [4, 8, 12].map(function (n) { var o = h('option', { value: n }, '최근 ' + n + '주'); if (n === ui.span) o.selected = true; return o; }));
+    var spanSel = h('select', { 'aria-label': '추이 기간' }, [4, 8, 12, 16].map(function (n) { var o = h('option', { value: n }, '최근 ' + n + '주'); if (n === ui.span) o.selected = true; return o; }));
     spanSel.addEventListener('change', function () { ui.span = Number(spanSel.value); render(); });
     var wk = currentWeek(), R = rules();
     var series = L.itemWeekly(db.records, ui.item, wk, ui.span, R.planned);
@@ -337,6 +406,15 @@
     rows.push({ cls: 'sum total', cells: cells('총합계', sum.total) });
     var num = head.map(function (x, i) { return i > 0 && i < head.length - 1; });
     var t = sum.total;
+    // 요약 피벗 양식(기본) — 보내 주신 요약 시트와 같은 칸: 행 레이블 · 계획시간 · 실투입시간 · 계획수량 · 양품 · 폐기 · 미달
+    var pivot = table(L.PIVOT_HEAD, L.pivotRows(sum).map(function (r) {
+      var v = r.values;
+      return { cls: r.kind === 'group' ? 'sum' : r.kind === 'total' ? 'sum total' : null, tdCls: { 0: r.kind === 'item' ? 'indent label' : 'label' },
+        cells: [r.label, n1(v[0]), n1(v[1]), L.fmtN(v[2]), L.fmtN(v[3]), L.fmtN(v[4]), L.fmtN(v[5])] };
+    }), { num: [0, 1, 1, 1, 1, 1, 1], cls: 'pivot' });
+    function viewBtn(id, label) {
+      return h('button', { type: 'button', 'aria-pressed': ui.weeklyView === id ? 'true' : 'false', onclick: function () { ui.weeklyView = id; render(); } }, label);
+    }
     return [
       pageHead('②', '주간 생산결산', '기간을 고르면 지금 쓰시는 요약표처럼 품명 → 품번으로 묶어 계획시간·실투입시간·계획수량·양품·폐기·미달을 모읍니다.',
         h('div', { class: 'btn-row no-print' },
@@ -348,11 +426,13 @@
           tile('계획수량 → 양품', L.fmtN(t.planQty) + ' → ' + L.fmtN(t.good), '미달 ' + L.fmtN(t.short)),
           tile('달성률', pct(t.achieve)), tile('폐기율', pct(t.scrapRate), '폐기 ' + L.fmtN(t.scrap) + '개'),
           tile('비가동', L.fmtN(L.round(t.downAll, 0)) + '분', L.topCodes(t, db.legend, 2).map(function (c) { return codeName(c.code) + ' ' + L.fmtN(c.min); }).join(' · '))),
-        h('section', { class: 'card' }, h('h2', null, '결산표 ' + ui.from + ' ~ ' + ui.to + ' (' + sum.rows + '행)'),
-          table(head, rows, { num: num, cls: 'weekly' }),
+        h('section', { class: 'card' }, h('div', { class: 'page-head' }, h('h2', null, '결산표 ' + ui.from + ' ~ ' + ui.to + ' (' + sum.rows + '행)'),
+            h('div', { class: 'view-toggle no-print', role: 'group', 'aria-label': '결산표 보기' }, viewBtn('pivot', '요약 피벗 양식'), viewBtn('detail', '자세히(비율·비가동)'))),
+          ui.weeklyView === 'detail' ? table(head, rows, { num: num, cls: 'weekly' }) : pivot,
           h('ul', { class: 'note' },
-            h('li', null, '미달수량 = 양품 − 계획수량(주간표의 미달수량 칸 수식과 같음). 음수면 계획보다 적게 만든 것입니다.'),
-            h('li', null, '보내 주신 요약 시트의 「미달수량」 열은 피벗 설정이 「개수」라서 행 수를 세고 있었습니다. 이 표는 수량을 더합니다(기획서 10장 확인 요청).'),
+            h('li', null, ui.weeklyView === 'detail' ? '품명·품번 순서와 앞 6개 값은 「요약 피벗 양식」과 같고, 달성률·폐기율·시간당 양품·비가동 코드별 시간을 덧붙였습니다.'
+              : '보내 주신 「주조 ○월 ○주차 요약」 피벗과 같은 칸 배치입니다(품명 소계 → 품번, 맨 아래 총합계). 비율·비가동은 「자세히」에서 봐 주세요.'),
+            h('li', null, '미달수량 = 양품 − 계획수량의 합계(2026-09-30 확정). 음수면 계획보다 적게 만든 것입니다. 원래 요약 시트는 피벗 값 설정이 「개수」라 행 수가 나왔으니, 피벗을 계속 쓰신다면 값 필드를 「합계」로 바꿔 주세요.'),
             h('li', null, '달성률 = 양품 ÷ 계획수량, 폐기율 = 폐기 ÷ (양품 + 폐기), 시간당 양품 = 양품 ÷ 실투입시간.'),
             h('li', null, '계획정지 코드(' + (planned().join(', ') || '없음') + ')는 비가동 합계에는 넣고, 이상 탐지의 비가동 비교에서는 뺍니다.')))]
         : h('section', { class: 'card empty' }, '이 기간에 행이 없습니다.')
@@ -360,9 +440,12 @@
   }
   function exportWeekly(sum) {
     var wb = XLSX.utils.book_new();
+    var ws0 = XLSX.utils.aoa_to_sheet(L.pivotToAoa(sum));
+    ws0['!cols'] = [{ wch: 18 }, { wch: 13 }, { wch: 14 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 }];
+    XLSX.utils.book_append_sheet(wb, ws0, '요약(피벗 양식)');
     var ws1 = XLSX.utils.aoa_to_sheet(L.summaryToAoa(sum, db.legend));
     ws1['!cols'] = [{ wch: 9 }, { wch: 14 }, { wch: 16 }];
-    XLSX.utils.book_append_sheet(wb, ws1, '주간 결산');
+    XLSX.utils.book_append_sheet(wb, ws1, '결산 자세히');
     var raw = [['기준일', '일자', '호기', '품번', '품명', '계획수량', '근무(HR)', '작업(HR)', '주조일자', '주조호기', '총 수량', '양품', '폐기', '미달(양품−계획)', '비가동(분)', '비가동내용', '원본 파일']];
     db.records.filter(function (r) { var d = L.baseDate(r); return d >= sum.from && d <= sum.to; }).forEach(function (r) {
       raw.push([L.baseDate(r), r.date, r.line, r.partNo, r.partName, r.planQty, r.planHr, r.workHr, r.castDate, r.castLine, r.total, r.good, r.scrap,
@@ -379,11 +462,34 @@
     var an = L.detectAnomalies(db.records, wk, R, db.legend);
     var real = an.filter(function (a) { return a.kind !== 'nobase'; }), nobase = an.filter(function (a) { return a.kind === 'nobase'; });
     var sum = L.summarize(db.records, { from: wk, to: L.weekEnd(wk), planned: R.planned });
-    var prompt = L.buildAiPrompt({ summary: sum, anomalies: an, rules: R, legend: db.legend });
-    var answer = h('textarea', { rows: 10, placeholder: 'AI 답을 여기에 붙여 넣어 주세요. 주간 보고서의 「AI 분석 의견」에 들어갑니다.' });
+    // 품번 가리기(기본 켬, 2026-09-30) — 별칭 대응표는 db.aliases 에 두고 같은 품번은 늘 같은 별칭
+    var mask = db.maskParts !== false;
+    var partNos = L.itemList(db.records).map(function (x) { return x.partNo; });
+    if (mask) db.aliases = L.assignAliases(db.aliases, partNos);
+    var info = L.buildAiPromptInfo({ summary: sum, anomalies: an, rules: R, legend: db.legend, aliases: mask ? db.aliases : null });
+    var prompt = info.prompt;
+    function back(t) { return mask ? L.unmaskText(t, db.aliases) : t; }
+    var answer = h('textarea', { rows: 10, placeholder: 'AI 답을 여기에 붙여 넣어 주세요. 별칭(품목1 등)은 품번으로 되돌려 주간 보고서의 「AI 분석 의견」에 넣습니다.' });
     answer.value = (db.aiNotes || {})[wk] || '';
-    answer.addEventListener('input', function () { db.aiNotes[wk] = answer.value; save(); });
+    answer.addEventListener('input', function () { db.aiNotes[wk] = back(answer.value); save(); });
+    answer.addEventListener('change', function () { var b = back(answer.value); if (b !== answer.value) { answer.value = b; toast('답의 별칭을 품번으로 되돌렸습니다.'); } });
     var promptBox = h('textarea', { rows: 12, readonly: true, class: 'mono' }); promptBox.value = prompt;
+    var maskBox = h('input', { type: 'checkbox' }); maskBox.checked = mask;
+    maskBox.addEventListener('change', function () { db.maskParts = maskBox.checked; save(); render(); });
+    var mapRows = Object.keys(info.map).sort(function (a, b) { return Number(info.map[a].slice(2)) - Number(info.map[b].slice(2)); }).map(function (pn) {
+      var it = L.itemList(db.records).filter(function (x) { return x.partNo === pn; })[0];
+      return [info.map[pn], pn, it ? it.partName : ''];
+    });
+    var maskCard = h('div', { class: 'mask-box' },
+      h('label', { class: 'opt' }, maskBox, h('span', null, h('span', { class: 't' }, '품번 가리기(외부 AI 에 품번을 보내지 않음)'),
+        h('span', { class: 's' }, '프롬프트의 품번을 「품목1」 같은 별칭으로 바꿉니다. 대응표는 이 브라우저에만 있고, AI 답의 별칭은 붙여 넣을 때 품번으로 되돌립니다.'))),
+      mask && info.leaks.length ? h('p', { class: 'alert warn' }, '가리지 못한 품번이 프롬프트에 남아 있습니다: ' + info.leaks.join(', ') + ' — 보내기 전에 지워 주세요.') : null,
+      mask ? h('p', { class: 'note' }, info.leaks.length ? '' : '확인: 프롬프트에 실제 품번이 없습니다(가져온 품번 ' + partNos.length + '개 대조). 품명·수량·비가동내용은 그대로 들어갑니다.') : h('p', { class: 'alert info' }, '지금은 품번이 그대로 들어갑니다. 회사 보안 기준을 확인해 주세요.'),
+      mask && mapRows.length ? h('details', null, h('summary', null, '별칭 대응표 — 이 프롬프트에 쓴 ' + mapRows.length + '개 (이 PC 에만 있음)'),
+        table(['별칭', '품번', '품명'], mapRows, { cls: 'alias' }),
+        h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn', onclick: function () {
+          copyText(mapRows.map(function (r) { return r.join('\t'); }).join('\n'));
+        } }, '대응표 복사(엑셀 붙여넣기용)'))) : null);
     return [
       pageHead('③', '이상 탐지 · AI 분석', '규칙으로 먼저 찾고(근거 숫자 표시), 그 사실만으로 AI 에게 요약·확인사항을 부탁합니다.'),
       h('section', { class: 'card filters' }, fld('분석할 주', weekSelect(render)),
@@ -400,12 +506,13 @@
       rulesCard(),
       h('section', { class: 'card', id: 'ai' }, h('h2', null, 'AI 분석 (반자동 기본)'),
         h('ol', { class: 'steps' },
-          h('li', null, '아래 프롬프트를 복사해 회사가 허용한 AI(ChatGPT 등)에 붙여 넣어 주세요. 계산된 숫자·비가동 기록만 들어 있고 작업자 이름은 넣지 않았습니다.'),
-          h('li', null, '받은 답을 「AI 답」 칸에 붙여 넣으면 주간 보고서에 들어갑니다. 답은 꼭 검토해 주세요.')),
+          h('li', null, '아래 프롬프트를 복사해 회사가 허용한 AI(ChatGPT 등)에 붙여 넣어 주세요. 계산된 숫자·비가동 기록만 들어 있고 작업자 이름은 넣지 않았습니다. 품번은 기본으로 별칭으로 바꿉니다.'),
+          h('li', null, '받은 답을 「AI 답」 칸에 붙여 넣으면 별칭이 품번으로 되돌아가 주간 보고서에 들어갑니다. 답은 꼭 검토해 주세요.')),
+        maskCard,
         promptBox,
         h('div', { class: 'btn-row', style: 'margin:10px 0' },
           h('button', { type: 'button', class: 'btn btn-primary', onclick: function () { copyText(prompt); } }, '프롬프트 복사'),
-          AIP.sendButton('설정한 AI 서버로 보내기(선택)', function () { return prompt; }, function (text) { answer.value = text; db.aiNotes[wk] = text; save(); toast('AI 답을 받았습니다. 검토 후 보고서에 씁니다.'); },
+          AIP.sendButton('설정한 AI 서버로 보내기(선택)', function () { return prompt; }, function (text) { text = back(text); answer.value = text; db.aiNotes[wk] = text; save(); toast('AI 답을 받았습니다(별칭은 품번으로 되돌림). 검토 후 보고서에 씁니다.'); },
             { toast: toast, settingsHref: '#/settings', system: '너는 주조 공장 생산관리 보조야. 주어진 사실 밖의 숫자를 만들지 마.' })),
         fld('AI 답 (' + L.weekLabel(wk).split(' (')[0] + ')', answer, '이 주에 붙여 넣은 답은 이 브라우저에 저장됩니다.'))
     ];
@@ -490,6 +597,7 @@
       h('h2', null, '4. 호기별 가동'),
       table(['호기', '양품', '실투입(HR)', '시간당 양품', '폐기율', '비가동(분)'],
         rep.lines.map(function (x) { return [x.line + '호기', L.fmtN(x.good), x.workHr, n1(x.perHour), pct(x.scrapRate), L.fmtN(L.round(x.downAll, 0))]; }), { num: numAll(6) }),
+      rep.idle && rep.idle.length ? h('p', { class: 'note' }, '이번 주 실적이 없는 호기: ' + rep.idle.map(function (x) { return x + '호기'; }).join(', ')) : null,
       rep.next.length ? [h('h2', null, '5. 다음 주 계획 (' + L.weekLabel(L.addDays(rep.week, 7)).split(' (')[0] + ')'),
         h('p', null, '계획 ' + rep.next.length + '건 · 계획수량 ' + L.fmtN(rep.next.reduce(function (s, r) { return s + (r.planQty || 0); }, 0)) + ' · 계획시간 ' + L.round(rep.next.reduce(function (s, r) { return s + (r.planHr || 0); }, 0), 1) + 'HR')] : null,
       ai ? [h('h2', null, (rep.next.length ? '6' : '5') + '. AI 분석 의견 (검토 후 사용)'), h('div', { class: 'pre' }, ai)] : null);
@@ -503,7 +611,8 @@
   function exportReportXlsx(rep) {
     var wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rep.text.split('\n').map(function (s) { return [s]; })), '보고서');
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(L.summaryToAoa(rep.summary, db.legend)), '결산');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(L.pivotToAoa(rep.summary)), '요약(피벗 양식)');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(L.summaryToAoa(rep.summary, db.legend)), '결산 자세히');
     var an = [['수준', '구분', '품번/호기', '이름', '항목', '근거', '비가동 상위', '비가동내용']];
     rep.anomalies.filter(function (a) { return a.kind !== 'nobase'; }).forEach(function (a) {
       an.push([a.level, a.scope === 'line' ? '호기' : '품목', a.id, a.name, a.title, L.evidence(a), L.codeText(a.topCodes), a.notes.join(' / ')]);

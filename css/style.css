@@ -167,6 +167,14 @@ a { color: var(--primary); }
 .field.invalid input, .field.invalid select, .field.invalid textarea { border-color: var(--danger); }
 fieldset.block { border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px 18px; margin: 0 0 18px; background: var(--surface); min-width: 0; }
 fieldset.block legend { font-weight: 800; padding: 0 6px; }
+details.block { border: 1px solid var(--line); border-radius: 14px; padding: 8px 18px; margin: 0 0 10px; background: var(--surface); min-width: 0; }
+details.block[open] { padding-bottom: 16px; }
+details.block > summary { font-weight: 800; overflow-wrap: anywhere; }
+.view-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.view-toggle button { border: 0; background: var(--surface); padding: 6px 14px; font: inherit; cursor: pointer; min-height: 36px; }
+.view-toggle button[aria-pressed="true"] { background: var(--primary); color: #fff; font-weight: 700; }
+table.list.pivot td.label { white-space: nowrap; }
+table.list.alias td:first-child { font-weight: 700; }
 .kind { display: inline-block; font-size: .75rem; font-weight: 800; padding: 1px 8px; border-radius: 999px; margin-left: 6px; vertical-align: middle; }
 .kind.fact { background: #e3f3e8; color: var(--fact); }
 .kind.obs { background: #fdf0dc; color: var(--obs); }
@@ -279,3 +287,5 @@ textarea { width: 100%; min-height: 120px; padding: 8px 10px; border: 1px solid 
   .table-wrap { overflow: visible; border: none; }
   table.list th, table.list td { padding: 3px 5px; }
 }
+.mask-box { border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; margin: 0 0 12px; background: #fafbfd; }
+.mask-box .opt { margin: 0; }

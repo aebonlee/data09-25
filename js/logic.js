@@ -43,6 +43,8 @@
 
   /* 비가동 코드 — 코드 이름은 파일 안의 범례(Code · 항목 · 비가동의 정의)를 읽어 채웁니다.
      범례가 없으면 「A 코드」처럼 코드만 보여 줍니다(뜻을 지어내지 않음). */
+  /* 호기 — 1~6호기(2026-09-30 수강생 확인). 이 밖의 값은 오타일 수 있어 가져오기에서 알립니다(반영은 함) */
+  var KNOWN_LINES = ['1', '2', '3', '4', '5', '6'];
   var DEFAULT_PLANNED = []; // 계획정지 코드 — 범례에 「계획정지」 표시가 있으면 거기서 채웁니다
 
   function norm(s) {
@@ -276,6 +278,9 @@
       var shortCell = num(row, 'short', r);
       if (shortCell != null && rec.produced && shortCell !== (rec.good || 0) - (rec.planQty || 0))
         out.warnings.push({ row: r + 1, msg: '미달수량 칸(' + shortCell + ')이 양품 − 계획수량(' + ((rec.good || 0) - (rec.planQty || 0)) + ')과 다릅니다. 이 도구는 양품 − 계획수량으로 계산합니다.' });
+      [['호기', rec.line], ['주조호기', rec.castLine]].forEach(function (x) {
+        if (x[1] && KNOWN_LINES.indexOf(x[1]) < 0) out.warnings.push({ row: r + 1, msg: x[0] + ' 「' + x[1] + '」 은 1~6호기 밖입니다. 오타가 아닌지 확인해 주세요(반영은 됩니다).' });
+      });
       if (rec.produced && rec.good != null && rec.workHr == null) out.warnings.push({ row: r + 1, msg: '양품은 있는데 작업(HR)이 비어 있어 시간당 생산량에서 빠집니다.' });
       var k = recKey(rec);
       if (seen[k]) out.warnings.push({ row: r + 1, msg: '같은 파일 안에 일자·호기·품번·주조일자가 같은 행이 또 있습니다(' + seen[k] + '행). 뒤의 행으로 덮어씁니다.' });
@@ -600,11 +605,22 @@
   }
 
   /* ③ AI 프롬프트 — 계산된 사실만 넣고, 사실 밖의 원인은 「추정」으로 표시하게 합니다 */
-  function buildAiPrompt(ctx) {
+  function buildAiPrompt(ctx) { return buildAiPromptInfo(ctx).prompt; }
+  /* ctx.aliases({품번: 별칭})가 있으면 품번을 별칭으로 바꿉니다 → { prompt, map(이 프롬프트에 쓴 {품번: 별칭}), leaks(남은 품번) } */
+  function buildAiPromptInfo(ctx) {
     var sum = ctx.summary, t = sum.total, L = [];
+    var al = ctx.aliases || null, used = {};
+    function P(pn) { if (!al || !al[pn]) return pn; used[pn] = al[pn]; return al[pn]; }
+    function T(s) {
+      if (!al) return s;
+      var m = maskText(s, al);
+      if (m !== s) Object.keys(al).forEach(function (pn) { if (textMaskable(pn) && pnRegex([pn]).test(s)) used[pn] = al[pn]; });
+      return m;
+    }
     L.push('너는 주조 공장의 생산관리 보조야. 아래 [사실]은 주간 생산실적 엑셀에서 도구가 계산한 값이야.');
     L.push('[사실]에 있는 숫자와 내용만 근거로 삼아 주간 생산 문제를 정리해줘. 숫자를 새로 만들거나 바꾸지 말아줘.');
     L.push('원인은 [사실]에 비가동 코드·비가동내용으로 적힌 것만 「기록된 원인」으로 쓰고, 그 밖의 원인은 반드시 「추정」이라고 표시해줘.');
+    if (al) L.push('품번은 보안상 「' + ALIAS_PREFIX + '1」 같은 별칭으로 바꿔 두었어. 답에서도 별칭을 띄어 쓰지 말고 그대로 써줘(실제 품번을 짐작하지 말아줘).');
     L.push('');
     L.push('[사실]');
     L.push('- 기간: ' + sum.from + ' ~ ' + sum.to + ' (기준일 = 주조일자, 주조 전 계획 행은 일자)');
@@ -618,13 +634,14 @@
     var an = (ctx.anomalies || []).filter(function (a) { return a.kind !== 'nobase'; });
     L.push('- 규칙으로 찾은 이상 ' + an.length + '건 (기준: ' + ruleText(ctx.rules) + ')');
     an.forEach(function (a, i) {
-      L.push('  ' + (i + 1) + '. [' + a.level + '] ' + (a.scope === 'line' ? '호기 ' : '품번 ') + a.id + (a.scope === 'item' ? '(' + a.name + ')' : '') + ' — ' + a.title + ': ' + evidence(a));
+      var ev = evidence(al ? copyWith(a, { related: (a.related || []).map(T) }) : a);
+      L.push('  ' + (i + 1) + '. [' + a.level + '] ' + (a.scope === 'line' ? '호기 ' + a.id : '품번 ' + P(a.id) + '(' + a.name + ')') + ' — ' + a.title + ': ' + ev);
       L.push('     이번 주 계획 ' + a.facts.planQty + ', 양품 ' + a.facts.good + ', 폐기 ' + a.facts.scrap + ', 작업 ' + a.facts.workHr + 'HR, 비가동 ' + a.facts.down + '분' +
-        (a.topCodes.length ? ', 비가동 코드 ' + codeText(a.topCodes) : '') + (a.notes.length ? ', 비가동내용 「' + a.notes.join('」 「') + '」' : ''));
+        (a.topCodes.length ? ', 비가동 코드 ' + codeText(a.topCodes) : '') + (a.notes.length ? ', 비가동내용 「' + a.notes.map(T).join('」 「') + '」' : ''));
     });
     if (!an.length) L.push('  (규칙에 걸린 항목 없음)');
     var nb = (ctx.anomalies || []).filter(function (a) { return a.kind === 'nobase'; });
-    if (nb.length) L.push('- 과거 기록이 부족해 비교하지 못한 품번: ' + nb.map(function (a) { return a.id; }).join(', '));
+    if (nb.length) L.push('- 과거 기록이 부족해 비교하지 못한 품번: ' + nb.map(function (a) { return P(a.id); }).join(', '));
     if (ctx.legend && Object.keys(ctx.legend).length) {
       L.push('- 비가동 코드 뜻: ' + Object.keys(ctx.legend).sort().map(function (c) { var x = ctx.legend[c]; return c + '=' + x.name + (x.planned ? '(계획정지)' : ''); }).join(', '));
     }
@@ -635,8 +652,10 @@
     L.push('3. 생산관리자가 현장에서 확인할 것 (항목마다 2~3개, 금형·설비·자재·작업 조건 가운데 기록과 관련 있는 것부터)');
     L.push('4. 다음 주에 해 볼 개선 방안 (과거 데이터와 비교해 말할 수 있는 것만)');
     L.push('확실하지 않은 것은 「확인 필요」라고 적어줘.');
-    return L.join('\n');
+    var text = L.join('\n');
+    return { prompt: text, map: used, leaks: al ? findLeaks(text, Object.keys(al)) : [] };
   }
+  function copyWith(o, extra) { var c = {}; Object.keys(o).forEach(function (k) { c[k] = o[k]; }); Object.keys(extra).forEach(function (k) { c[k] = extra[k]; }); return c; }
   function ruleText(r) {
     r = cleanRules(r);
     return '직전 ' + r.baseWeeks + '주 중앙값 대비 시간당 생산량 −' + round(r.perHourDrop * 100, 0) + '% · 달성률 −' + round(r.achieveDrop * 100, 0) + '%p · 폐기율 +' +
@@ -680,6 +699,8 @@
     lines.forEach(function (x) {
       L.push('  - ' + x.line + '호기: 양품 ' + fmtN(x.good) + ', 작업 ' + x.workHr + 'HR, 시간당 양품 ' + fmtVal(x.perHour, '개/HR') + ', 폐기율 ' + fmtVal(x.scrapRate, '%') + ', 비가동 ' + fmtN(round(x.downAll, 0)) + '분');
     });
+    var idle = idleLines(lines);
+    if (idle.length) L.push('  - 이번 주 실적이 없는 호기: ' + idle.map(function (x) { return x + '호기'; }).join(', '));
     if (next.length) {
       L.push('');
       L.push('5. 다음 주 계획 (' + weekLabel(nextFrom) + ')');
@@ -690,7 +711,11 @@
       L.push((next.length ? '6' : '5') + '. AI 분석 의견 (검토 후 사용)');
       str(aiText).split('\n').forEach(function (s) { L.push('  ' + s); });
     }
-    return { week: week, from: from, to: to, summary: sum, anomalies: an, lines: lines, next: next, notDone: notDone, text: L.join('\n') };
+    return { week: week, from: from, to: to, summary: sum, anomalies: an, lines: lines, idle: idle, next: next, notDone: notDone, text: L.join('\n') };
+  }
+  function idleLines(lines) {
+    var on = {}; (lines || []).forEach(function (x) { if (x.produced) on[x.line] = 1; });
+    return KNOWN_LINES.filter(function (k) { return !on[k]; });
   }
   function fmtN(n) { return n == null ? '-' : Number(n).toLocaleString('ko-KR'); }
 
@@ -715,8 +740,94 @@
     return aoa;
   }
 
+  /* ② 요약 피벗 양식 — 보내 주신 「주조 ○월 ○주차 요약」 시트와 같은 칸 배치(2026-09-30 확정).
+     행 레이블 한 열에 품명(소계) → 그 아래 품번, 맨 아래 총합계. 값 = 계획시간·실투입시간·계획수량·양품·폐기·미달(양품 − 계획, 합계). */
+  var PIVOT_HEAD = ['행 레이블', '계획시간(HR)', '실투입시간(HR)', '계획수량', '양품수량', '폐기수량', '미달수량'];
+  function pivotRows(sum) {
+    function vals(a) { return [round(a.planHr, 2), round(a.workHr, 2), a.planQty, a.good, a.scrap, a.short]; }
+    var out = [];
+    sum.groups.forEach(function (g) {
+      out.push({ kind: 'group', label: g.name, values: vals(g.sub) });
+      g.items.forEach(function (it) { out.push({ kind: 'item', label: it.partNo, values: vals(it) }); });
+    });
+    out.push({ kind: 'total', label: '총합계', values: vals(sum.total) });
+    return out;
+  }
+  function pivotToAoa(sum) {
+    var aoa = [['주조 주간 생산결산(요약 피벗 양식) ' + sum.from + ' ~ ' + sum.to], PIVOT_HEAD.slice()];
+    pivotRows(sum).forEach(function (r) { aoa.push([r.label].concat(r.values)); });
+    return aoa;
+  }
+
+  /* ── 7. 여러 주 한꺼번에 가져오기 (2026-09-30 — 3~4달 치를 한 번에) ──────
+     파일을 고른 순서와 상관없이 결과가 같도록 「실적이 가장 늦은 날」이 이른 파일부터 반영합니다.
+     list: [{ fileName, records }] → 같은 항목을 정렬한 새 배열 */
+  function fileLastDate(records) {
+    var last = '';
+    (records || []).forEach(function (r) { if (r.produced) { var d = baseDate(r); if (d > last) last = d; } });
+    return last;
+  }
+  function importOrder(list) {
+    return (list || []).map(function (x, i) { return { x: x, i: i, d: fileLastDate(x.records) || '9999' }; })
+      .sort(function (a, b) { return cmp(a.d, b.d) || cmp(a.x.fileName, b.x.fileName) || (a.i - b.i); })
+      .map(function (o) { return o.x; });
+  }
+  /* 쌓인 실적 주가 비지 않았는지 — 첫 주 ~ 마지막 주 사이에 실적이 없는 주를 찾습니다 */
+  function weekCoverage(records) {
+    var ws = producedWeeks(records || []);
+    var out = { first: ws[0] || '', last: ws[ws.length - 1] || '', weeks: ws, missing: [] };
+    if (!ws.length) return out;
+    var have = {}; ws.forEach(function (w) { have[w] = 1; });
+    for (var w = out.first; w <= out.last; w = addDays(w, 7)) if (!have[w]) out.missing.push(w);
+    return out;
+  }
+  /* 머리행이 같은 파일끼리 열 연결을 함께 고치기 위한 표지 */
+  function headerSignature(det) { return det && det.headers ? det.headers.map(norm).join('|') : ''; }
+
+  /* ── 9. 품번 가리기 (2026-09-30 — 「외부 AI 에 품번을 안 보낼 수 있으면 안 보내면 좋겠다」) ──
+     AI 프롬프트의 품번을 「품목1」 같은 별칭으로 바꾸고, 대응표는 이 브라우저에만 둡니다.
+     AI 답의 별칭은 대응표로 다시 품번으로 되돌려 보고서에 넣습니다. */
+  var ALIAS_PREFIX = '품목';
+  /* 이미 있는 대응표를 유지하고(같은 품번 = 늘 같은 별칭) 새 품번에만 다음 번호를 붙입니다 */
+  function assignAliases(map, partNos) {
+    var out = {}, used = 0;
+    Object.keys(map || {}).forEach(function (pn) {
+      var m = new RegExp('^' + ALIAS_PREFIX + '(\\d+)$').exec(map[pn]);
+      if (m) { out[pn] = map[pn]; used = Math.max(used, +m[1]); }
+    });
+    uniq((partNos || []).map(str).filter(Boolean)).forEach(function (pn) { if (!out[pn]) out[pn] = ALIAS_PREFIX + (++used); });
+    return out;
+  }
+  function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\\/-]/g, '\\$&'); }
+  /* 자유 글(비가동내용 등) 안에서 바꿔도 되는 품번 — 너무 짧거나 숫자만 5자리 이하인 품번은 코드(A~J)·분·수량과
+     헷갈려 글 속에서는 바꾸지 않습니다. 품번 칸 자리(이상 목록 등)는 글자 모양과 상관없이 늘 별칭으로 바뀝니다. */
+  function textMaskable(pn) { return pn.length >= 4 && (/[^0-9]/.test(pn) || pn.length >= 6); }
+  function pnRegex(pns) {
+    if (!pns.length) return null;
+    var list = pns.slice().sort(function (a, b) { return b.length - a.length; }).map(escRe);
+    return new RegExp('(^|[^0-9A-Za-z])(' + list.join('|') + ')(?![0-9A-Za-z])', 'g');
+  }
+  function maskText(text, map) {
+    var re = pnRegex(Object.keys(map || {}).filter(textMaskable));
+    if (!re || text == null) return text == null ? '' : String(text);
+    return String(text).replace(re, function (all, pre, pn) { return pre + map[pn]; });
+  }
+  /* AI 답 → 품번. 「품목3」만 바꾸고 「품목 3개」「품목3개」처럼 수를 세는 말은 그대로 둡니다 */
+  function unmaskText(text, map) {
+    var back = {};
+    Object.keys(map || {}).forEach(function (pn) { back[map[pn]] = pn; });
+    return String(text == null ? '' : text).replace(new RegExp(ALIAS_PREFIX + '(\\d+)(?![0-9개건종가])', 'g'), function (all) { return back[all] || all; });
+  }
+  /* 안전망 — 가린 뒤에도 프롬프트에 남은 품번(글 속 표기가 달라 못 바꾼 것 등) */
+  function findLeaks(text, partNos) {
+    var s = String(text || '');
+    return uniq((partNos || []).filter(function (pn) {
+      if (!textMaskable(pn)) return false;
+      var re = pnRegex([pn]); return re.test(s);
+    }));
+  }
   /* ── 8. 저장 형식 ─────────────────────────────────────────── */
-  function emptyDb() { return { schemaVersion: SCHEMA_VERSION, records: [], legend: {}, files: [], rules: cleanRules({}), aiNotes: {} }; }
+  function emptyDb() { return { schemaVersion: SCHEMA_VERSION, records: [], legend: {}, files: [], rules: cleanRules({}), aiNotes: {}, aliases: {}, maskParts: true }; }
   function restoreDb(o) {
     var db = emptyDb();
     if (!o || typeof o !== 'object') return db;
@@ -727,6 +838,8 @@
     if (Array.isArray(o.files)) db.files = o.files;
     db.rules = cleanRules(o.rules || {});
     if (o.aiNotes && typeof o.aiNotes === 'object') db.aiNotes = o.aiNotes;
+    if (o.aliases && typeof o.aliases === 'object') db.aliases = assignAliases(o.aliases, []);
+    if (o.maskParts === false) db.maskParts = false;
     return db;
   }
 
@@ -737,6 +850,8 @@
     isProduced: isProduced, recKey: recKey, mergeRecords: mergeRecords, baseDate: baseDate, machine: machine, weeksOf: weeksOf, producedWeeks: producedWeeks,
     aggregate: aggregate, summarize: summarize, itemList: itemList, itemWeekly: itemWeekly, byLine: byLine, topCodes: topCodes, topNotes: topNotes,
     median: median, cleanRules: cleanRules, detectAnomalies: detectAnomalies, evidence: evidence, fmtVal: fmtVal, fmtN: fmtN, codeText: codeText, ruleText: ruleText,
-    buildAiPrompt: buildAiPrompt, buildReport: buildReport, summaryToAoa: summaryToAoa, emptyDb: emptyDb, restoreDb: restoreDb
+    buildAiPrompt: buildAiPrompt, buildAiPromptInfo: buildAiPromptInfo, buildReport: buildReport, summaryToAoa: summaryToAoa, emptyDb: emptyDb, restoreDb: restoreDb,
+    PIVOT_HEAD: PIVOT_HEAD, pivotRows: pivotRows, pivotToAoa: pivotToAoa, fileLastDate: fileLastDate, importOrder: importOrder, weekCoverage: weekCoverage, headerSignature: headerSignature,
+    KNOWN_LINES: KNOWN_LINES, ALIAS_PREFIX: ALIAS_PREFIX, assignAliases: assignAliases, maskText: maskText, unmaskText: unmaskText, findLeaks: findLeaks
   };
 });

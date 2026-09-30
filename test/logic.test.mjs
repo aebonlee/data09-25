@@ -279,4 +279,100 @@ test('엑셀로 썼다가 다시 읽어도 같은 결과 (SheetJS 왕복)', () =
   assert.equal(JSON.stringify(p1.records.map(r => [L.recKey(r), r.good, r.scrap, r.down])), JSON.stringify(p2.records.map(r => [L.recKey(r), r.good, r.scrap, r.down])));
 });
 
+console.log('2026-09-30 반영 — 요약 피벗 양식 · 여러 주 가져오기 · 호기 1~6 · 품번 가리기');
+test('요약 피벗 양식 — 행 레이블(품명 소계 → 품번) · 계획시간·실투입·계획수량·양품·폐기·미달(양품−계획 합계) · 총합계', () => {
+  const s = L.summarize(L.parseSheet(TINY).records, { from: '2026-09-21', to: '2026-09-27' });
+  const rows = L.pivotRows(s);
+  assert.deepEqual(L.PIVOT_HEAD, ['행 레이블', '계획시간(HR)', '실투입시간(HR)', '계획수량', '양품수량', '폐기수량', '미달수량']);
+  assert.deepEqual(rows.map(r => r.kind + ':' + r.label), ['group:매니폴드', 'item:T-100', 'group:파이프', 'item:T-200', 'item:T-300', 'total:총합계']);
+  const t = rows[rows.length - 1].values;
+  assert.deepEqual(t, [s.total.planHr, s.total.workHr, 230, 195, 5, 195 - 230]);
+  assert.equal(rows[1].values[5], 158 - 100, 'T-100 미달 = 양품 158 − 계획 100');
+  const aoa = L.pivotToAoa(s);
+  assert.deepEqual(aoa[1], L.PIVOT_HEAD);
+  assert.equal(aoa.length, 2 + rows.length);
+  assert.equal(aoa[aoa.length - 1][0], '총합계');
+});
+test('여러 주 한꺼번에 — 고른 순서가 거꾸로·뒤섞여도 누적 결과가 같음', () => {
+  const parsed = Sample.build().map(f => ({ fileName: f.fileName, records: L.parseSheet(f.aoa, { fileName: f.fileName }).records }));
+  const run = list => { let recs = []; for (const x of L.importOrder(list)) recs = L.mergeRecords(recs, x.records).records; return recs; };
+  const key = recs => JSON.stringify(recs.map(r => [L.recKey(r), r.good, r.produced]));
+  const base = key(SREC);
+  assert.equal(key(run(parsed)), base);
+  assert.equal(key(run(parsed.slice().reverse())), base);
+  assert.equal(key(run([parsed[5], parsed[0], parsed[7], parsed[2], parsed[1], parsed[6], parsed[3], parsed[4]])), base);
+  assert.deepEqual(L.importOrder(parsed.slice().reverse()).map(x => x.fileName), parsed.map(x => x.fileName));
+  assert.equal(L.fileLastDate(parsed[7].records) <= '2026-09-27', true);
+});
+test('쌓인 주 점검 — 중간에 빠진 주를 찾음', () => {
+  const cov = L.weekCoverage(SREC);
+  assert.equal(cov.weeks.length, 8); assert.deepEqual(cov.missing, []);
+  const gap = L.weekCoverage(SREC.filter(r => L.weekStart(L.baseDate(r)) !== '2026-08-17'));
+  assert.deepEqual(gap.missing, ['2026-08-17']);
+  assert.equal(gap.first, '2026-08-03'); assert.equal(gap.last, '2026-09-21');
+});
+test('열 연결 표지 — 머리행이 같은 파일끼리 같은 값', () => {
+  const a = L.detectColumns(TINY), b = L.detectColumns(Sample.build()[0].aoa);
+  assert.equal(L.headerSignature(a), L.headerSignature(b));
+  assert.notEqual(L.headerSignature(a), L.headerSignature(L.detectColumns([['품번', '일자', '호기', '계획수량']])));
+});
+test('호기 1~6 밖의 값은 가져오기에서 알림(반영은 함)', () => {
+  const t = TINY.map(r => r.slice());
+  t[3][1] = 7; t[4][9] = 9;
+  const p = L.parseSheet(t);
+  assert.ok(p.warnings.some(w => w.row === 4 && /호기 「7」 은 1~6호기 밖/.test(w.msg)));
+  assert.ok(p.warnings.some(w => w.row === 5 && /주조호기 「9」/.test(w.msg)));
+  assert.equal(p.records.length, 5);
+  assert.ok(!L.parseSheet(TINY).warnings.some(w => /1~6호기 밖/.test(w.msg)));
+});
+test('보고서 — 이번 주 실적이 없는 호기를 적음', () => {
+  const recs = L.parseSheet(TINY).records;
+  const rep = L.buildReport(recs, '2026-09-21', RULES, {}, '');
+  assert.deepEqual(rep.idle, ['3', '4', '5', '6']);
+  assert.match(rep.text, /이번 주 실적이 없는 호기: 3호기, 4호기, 5호기, 6호기/);
+});
+test('품번 별칭 — 한 번 붙은 별칭은 그대로, 새 품번만 다음 번호', () => {
+  const a = L.assignAliases({}, ['SMP-B', 'SMP-A', 'SMP-A']);
+  assert.deepEqual(a, { 'SMP-A': '품목1', 'SMP-B': '품목2' });
+  const b = L.assignAliases(a, ['AAA-0', 'SMP-B']);
+  assert.deepEqual(b, { 'SMP-A': '품목1', 'SMP-B': '품목2', 'AAA-0': '품목3' });
+  assert.deepEqual(L.assignAliases({ X: '엉뚱', Y: '품목7' }, ['X']), { Y: '품목7', X: '품목8' });
+});
+test('AI 프롬프트 품번 가리기 — 이상 목록·관련·비교 못 한 품번·비가동내용 속 품번까지 별칭, 대응표로 되돌림', () => {
+  const an = L.detectAnomalies(SREC, '2026-09-21', RULES, SLEG);
+  // 실제 주간표처럼 비가동내용에 다음 품번이 적힌 경우 — 「A:(다음 품번) 금형교환(180)」
+  const p202 = an.find(a => a.id === 'SMP-P202' && a.kind === 'scrap');
+  p202.notes = ['A:(SMP-M101) 금형교환(180)', 'F:기공 불량 선별(40)'];
+  const sum = L.summarize(SREC, { from: '2026-09-21', to: '2026-09-27' });
+  const aliases = L.assignAliases({}, L.itemList(SREC).map(x => x.partNo));
+  const info = L.buildAiPromptInfo({ summary: sum, anomalies: an, rules: RULES, legend: SLEG, aliases });
+  assert.ok(!/SMP-/.test(info.prompt), '품번이 남음: ' + (info.prompt.match(/SMP-\w+/g) || []).join(','));
+  assert.deepEqual(info.leaks, []);
+  assert.match(info.prompt, new RegExp('품번 ' + aliases['SMP-P202'] + '\\(파이프\\) — 폐기율 증가'));
+  assert.ok(info.prompt.includes('A:(' + aliases['SMP-M101'] + ') 금형교환(180)'), '비가동내용 속 품번');
+  assert.ok(info.prompt.includes('C=설비 이상') || info.prompt.includes('C='), '코드 글자는 그대로');
+  assert.ok(info.map['SMP-P202'] && info.map['SMP-M101']);
+  assert.match(info.prompt, /별칭을 띄어 쓰지 말고/);
+  // 숫자는 그대로(가리기가 수량·분을 건드리지 않음)
+  const plain = L.buildAiPrompt({ summary: sum, anomalies: an, rules: RULES, legend: SLEG });
+  assert.equal(plain.match(/\d+/g).join(','), L.unmaskText(info.prompt, aliases).replace(/\n품번은 보안상[^\n]*/, '').match(/\d+/g).join(','));
+  // AI 답 되돌리기
+  const ans = aliases['SMP-P202'] + ' 폐기율 확인. ' + aliases['SMP-M101'] + '로 교체 전 금형 점검. 품목 3개, 품목2개는 그대로.';
+  const back = L.unmaskText(ans, aliases);
+  assert.ok(back.startsWith('SMP-P202 폐기율 확인. SMP-M101로 교체'));
+  assert.ok(back.endsWith('품목 3개, 품목2개는 그대로.'));
+});
+test('품번 가리기 안전망 — 가리지 못한 품번이 있으면 찾아냄', () => {
+  assert.deepEqual(L.findLeaks('불량 SMP-P202 확인, SMP-P2020 은 다른 것', ['SMP-P202', 'SMP-C301']), ['SMP-P202']);
+  assert.deepEqual(L.findLeaks('SMP-P2020 만 있음', ['SMP-P202']), [], '더 긴 다른 품번 속은 아님');
+  assert.equal(L.maskText('C:(1234567) 설비(180)', { '1234567': '품목1', 'C': '품목2', '180': '품목3' }), 'C:(품목1) 설비(180)', '짧은 품번은 글 속에서 바꾸지 않음');
+});
+test('저장 형식 — 별칭 대응표·가리기 설정 보관, 기본은 가리기 켬', () => {
+  assert.equal(L.emptyDb().maskParts, true);
+  const db = L.restoreDb({ records: [], aliases: { A1: '품목1', bad: 3 }, maskParts: false });
+  assert.deepEqual(db.aliases, { A1: '품목1' });
+  assert.equal(db.maskParts, false);
+  assert.equal(L.restoreDb({ records: [] }).maskParts, true);
+});
+
 console.log('\n' + passed + '개 통과' + (process.exitCode ? ' — 실패 있음' : ''));
